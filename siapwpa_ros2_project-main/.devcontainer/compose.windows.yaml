@@ -1,28 +1,23 @@
 services:
   workspace:
     build: .
-    ipc: host
-    network_mode: host
+    # network_mode i ipc usunięte - nie są zalecane na Windows
     privileged: true
     tty: true
-    runtime: nvidia
     stdin_open: true
+    # runtime: nvidia USUNIĘTE - to była główna przyczyna awarii
     security_opt:
       - seccomp:unconfined
       - apparmor:unconfined
     volumes:
+      # Mapowanie Twojego kodu - to jest OK
       - ../:/home/developer/ros2_ws/src:cached
-      - /tmp/.X11-unix:/tmp/.X11-unix
-      - /usr/lib/wsl:/usr/lib/wsl
+      # Usunięto /tmp/.X11-unix i /usr/lib/wsl - to są ścieżki dla Linuxa
     devices:
       - /dev:/dev
     environment:
-      - DISPLAY
+      # To jest JEDYNE ustawienie wyświetlacza, którego potrzebujesz:
+      - DISPLAY=host.docker.internal:0.0
+      # Ta flaga jest OK
       - "QT_X11_NO_MITSHM=1"
-      - NVIDIA_VISIBLE_DEVICES=all
-      # - NVIDIA_DRIVER_CAPABILITIES=compute,utility,display
-      - NVIDIA_DRIVER_CAPABILITIES=all
-      - LIBVA_DRIVER_NAME=d3d12
-      - MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA
-      - LD_LIBRARY_PATH=/usr/lib/wsl/lib
-      - LIBGL_ALWAYS_SOFTWARE=false
+      # Wszystkie flagi NVIDIA, MESA, LIBVA USUNIĘTE - powodowały błędy

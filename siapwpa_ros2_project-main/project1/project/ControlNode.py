@@ -6,7 +6,7 @@ from geometry_msgs.msg import Twist
 import os 
 import cv2
 import numpy as np
-from scipy.interpolate import splprep, splev
+from scipy.interpolate import UnivariateSpline
 
 #to create bridge
 #ros2 run ros_gz_bridge parameter_bridge /cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist
@@ -15,11 +15,141 @@ from scipy.interpolate import splprep, splev
 #   /cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist \
 #   /world/mecanum_drive/model/vehicle_blue/link/front_camera_link/sensor/front_camera/image@sensor_msgs/msg/Image@gz.msgs.Image
 
+class regulatorPID():
+    def __init__(self, P, I, D, dt, outlim):
+        self.P = P
+        self.I = I
+        self.D = D
+        self.dt = dt
+        self.outlim = outlim
+        self.x_prev = 0 
+        self.x_sum = 0
+
+    def output(self, x):
+        P = self.P * x
+        if np.abs(x) < self.outlim:
+            self.x_sum += self.I * x * self.dt
+        D = self.D * (x - self.x_prev) / self.dt
+        out =   P + self.x_sum + D
+        self.x_prev = x
+        if out > self.outlim: out = self.outlim
+        elif out < -self.outlim: out = -self.outlim
+        return out
+    
+def perspectiveWarp(frame):
+    # 640x420
+    height, width = frame.shape[:2]
+    y_sc = 0.6 # y_sc = 0.6
+    x_sc = 0.3399 # x_sc = 0.33
+    H2 = int(height*y_sc)
+    # W2_L = int(width//2 - 220)
+    # W2_R = int(width//2 + 200)
+    W2_L = int(width * x_sc)
+    W2_R = int(width * (1 - x_sc))
+    # --- 1. Punkty źródłowe (SRC) - Trapez na obrazie ---
+    src = np.float32([
+        [W2_L, H2],  # Lewy-górny punkt trapezu (daleko)
+        [W2_R, H2],  # Prawy-górny punkt trapezu (daleko)
+        [width, height],  # Prawy-dolny punkt trapezu (blisko)
+        [0, height]    # Lewy-dolny punkt trapezu (blisko)
+    ])
+
+    # --- 2. Punkty docelowe (DST) - Prostokąt w widoku "z góry" (BEV) ---
+    dst = np.float32([
+        [0, 0],             # Mapuj lewy-górny (src) na lewy-górny (dst)
+        [width, 0],         # Mapuj prawy-górny (src) na prawy-górny (dst)
+        [width, height],    # Mapuj prawy-dolny (src) na prawy-dolny (dst)
+        [0, height]         # Mapuj lewy-dolny (src) na lewy-dolny (dst)
+    ])
+    img_size = (width, height)
+    matrix = cv2.getPerspectiveTransform(src, dst)
+    birdseye = cv2.warpPerspective(frame, matrix, img_size)
+    return birdseye
+
+def get_spline(frame, visu = True):
+    # Convert to HSV, threshold on yellow object
+    frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lower_yellow = np.array([10, 80, 80])   
+    upper_yellow = np.array([35, 255, 255])
+    mask = cv2.inRange(frame_hsv, lower_yellow, upper_yellow)
+    height, width = frame.shape[:2]
+  
+    # Get centroids
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    x_pts = []
+    y_pts = []
+    for i in range(1, num_labels):
+        cx, cy = centroids[i]
+        if cy < height and cx < width:
+            x_pts.append(cx)
+            y_pts.append(cy)
+            cv2.circle(frame, (int(cx),int(cy)), 5, color=(0,255,0), thickness=2)
+    if len(y_pts) >= 4:
+        # convert to np array
+        x_pts = np.array(x_pts)
+        y_pts = np.array(y_pts)
+        # sort with y falling to keep proper order
+        sort_idx = np.argsort(y_pts)
+        x_pts = x_pts[sort_idx]
+        y_pts = y_pts[sort_idx]
+        # create spline
+        spline = UnivariateSpline(y_pts, x_pts, s=0.7)  # s=0 dokładnie przez punkty, większe s → gładziej
+    
+        if visu:
+            y_smooth = np.linspace(y_pts.min(),y_pts.max(), 30)
+            x_smooth = spline(y_smooth) 
+            spline_points = np.vstack([x_smooth, y_smooth]).T.astype(np.int32)
+            cv2.polylines(frame, [spline_points], isClosed=False, color=(0,255,0), thickness=2)
+        # returns spline (math object), start point, frame with spline drawed
+        return spline, (int(x_pts[-1]), int(y_pts[-1])), frame
+    else: return None, (0, 0), frame
+
+# def get_dir(spline, p1, frame = None, dy = 50):
+#     x1, y1 = p1
+#     x1 = spline(y1)
+#     if x1 is None: return 0., frame
+#     y2 = y1 - dy
+#     x2 = spline(y2)
+#     if x2 is None: return 0., frame
+#     p2 = (int(x2), int(y2))
+#     if not frame is None:
+#         cv2.arrowedLine(frame, p1, p2, (0,0,255), 3)
+#     # dS = (y2 - y1) / (x2 - x1)
+#     return y2 - y1, x2 - x1, frame
+
+def get_dir(spline, p1, frame=None, dy=50):
+    x1, y1 = p1
+    try:
+        y_min = spline.get_knots().min()
+    except Exception:
+        # Jeśli spline jest z jakiegoś powodu puste lub uszkodzone, zwracamy 0
+        return 0., 0., frame
+    x1 = spline(y1) 
+    y2_target = y1 - dy
+    y2 = max(y2_target, y_min)
+    if y2 == y1: 
+        return 0., 0., frame
+    x2 = spline(y2)
+    if np.isnan(x1) or np.isnan(x2):
+        print("Błąd NaN w spline. Zwracam neutralny wektor.")
+        return 0., 0., frame 
+    # Bezpieczne rzutowanie na int po walidacji
+    p1_int = (int(x1), int(y1))
+    p2_int = (int(x2), int(y2)) 
+    # Rysowanie strzałki kierunku
+    if frame is not None:
+        cv2.arrowedLine(frame, p1_int, p2_int, (0, 0, 255), 3) 
+    return y1 - y2, x1 - x2, frame
+
 class ControllerNode(Node):
 
     def __init__(self):
         super().__init__("controller_node")
         # Timer
+        self.v = 0.3
+        self.x = 0 
+        
+        self.PID = regulatorPID(0.01, 0.01, 0.01, 0.5, 1)
         self.send_msg_timer = 0.5
 
         # Publisher na /cmd_vel -> control
@@ -43,156 +173,37 @@ class ControllerNode(Node):
         self.timer = self.create_timer(self.send_msg_timer, self.set_speed)
 
     def set_speed(self):
-      msg_out=Twist()
+        msg_out=Twist()
+        out = self.PID.output(self.x)
+        print(f'out: {out}')
 
-      # --- control algo ---
-
-
-      # --------------------
-
-      # --- speed mapping ---
-      msg_out.linear.x = 0.3
-      msg_out.linear.y = 0.
-      msg_out.angular.z = 0.
-      self.cmd_vel_publisher.publish(msg_out)
-      self.get_logger().info(f"Msg sent: x={msg_out.linear.x}, y={msg_out.linear.y}, a_z={msg_out.angular.z}")
-
+        # --- speed mapping ---
+        msg_out.linear.x = 1.0
+        msg_out.linear.y = 0.
+        msg_out.angular.z = float(out)
+        self.cmd_vel_publisher.publish(msg_out)
+        self.get_logger().info(f"Msg sent: x={msg_out.linear.x}, y={msg_out.linear.y}, a_z={msg_out.angular.z}")
 
 
     # --- image processing fcn ----
 
-    def perspectiveWarp(self, frame):
-        # Obszar z obrazu wejściowego, który ma być rzutowany
-        width = 640 
-        height = 480
-        offset = 100
-        src = np.float32([
-            [200, 300],  # lewy górny róg pasa
-            [440, 300],  # prawy górny róg pasa
-            [0, 480],    # lewy dolny róg obrazu
-            [width, 480] # prawy dolny róg obrazu
-        ])
-
-        # --- 2. Punkty docelowe (prostokąt bird's eye) ---
-        dst = np.float32([
-            [0, 0],          # lewy górny
-            [width, 0],      # prawy górny
-            [0, height],     # lewy dolny
-            [width, height]  # prawy dolny
-        ])
-
-
-        # Wyciągnięcie rozmiaru obrazu
-        img_size = (frame.shape[1], frame.shape[0])
-
-        # Rzutowanie obszaru z src na obszar dst
-        matrix = cv2.getPerspectiveTransform(src, dst)
-        birdseye = cv2.warpPerspective(frame, matrix, img_size)
-
-        return birdseye
-
     def image_callback(self, msg):
 
-
-
-        # 1) uporzadkowac kod
-        # 2) zmienic transformate hougha -> szukanie centroidow 
-
-
         # Konwersja obrazu ROS -> OpenCV
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8') #480x640
-        frame = self.perspectiveWarp(frame)
-        # gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # edges = cv2.Canny(gray, 100, 200)
-
-        frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        lower_yellow = np.array([10, 80, 80])   
-        upper_yellow = np.array([35, 255, 255])
-        mask = cv2.inRange(frame_hsv, lower_yellow, upper_yellow)
-
-
-        # thresh_lvl = 50
-        # _, thresh_frame = cv2.threshold(frame,  thresh_lvl, 255, cv2.THRESH_BINARY_INV)
-        edges = cv2.Canny(mask, 100, 200)
-
-        lines = cv2.HoughLinesP(edges,
-                        rho=1,
-                        theta=np.pi/180,
-                        threshold=50,
-                        minLineLength=50,
-                        maxLineGap=20)
-        x = []
-        y = []
-        if not lines is None:                
-            for l in lines:                
-                x1, y1, x2, y2 = l[0]
-                x.append(x1)
-                x.append(x2)
-                y.append(y1)
-                y.append(y2)
-
-                # cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        frame_orginal = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8') #480x640
+        frame = frame_orginal.copy()
+        frame = perspectiveWarp(frame)
+        spline, p0, frame = get_spline(frame)
+        if not spline is None: 
+            dy, dx, frame = get_dir(spline, p0, frame)
+            self.x = np.arctan2(dx, dy) * 180 / np.pi
+            print(f'x: {self.x}')
+        else:
+            print('Control unavailable.')
 
         
-        # Tworzymy spline parametryczny przechodzący dokładnie przez punkty
-        spline_avail = False
-        if len(x) >= 4:
-            k = 3  # domyślny cubic spline
-            spline_avail = True
-        elif len(x) == 3:
-            k = 2
-            spline_avail = True
-        elif len(x) == 2:
-            k = 1
-            spline_avail = True
-
-        if spline_avail: 
-            tck, u = splprep([x, y], s=0, k=k)
-
-            # Generujemy 100 punktów na spline, aby linia była gładka
-            u_fine = np.linspace(0, 1, 100)
-            x_fine, y_fine = splev(u_fine, tck)
-
-            # Rysujemy spline na obrazie
-            for i in range(1, len(x_fine)):
-                pt1 = (int(x_fine[i-1]), int(y_fine[i-1]))
-                pt2 = (int(x_fine[i]), int(y_fine[i]))
-                cv2.line(frame, pt1, pt2, (0, 255, 0), 2)  # zielona linia
-
-
-        # blur = cv2.GaussianBlur(gray, (5,5), 0)
-        # edges = cv2.Canny(blur, threshold1=50, threshold2=150)
-
-        # num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh_frame)
-
-        # thresh_frame = np.uint8(labels == 2) * 255
-        # jeśli thresh_frame jest 1-kanałowy, konwertujemy na BGR
-        # output = cv2.cvtColor(thresh_frame, cv2.COLOR_GRAY2BGR)
-
-
-
-
-        # for i in range(2, num_labels):  # pomijamy tło i pierwszy największy komponent
-        #     cx, cy = centroids[i]
-        #     cx, cy = int(cx), int(cy)  # zamiana na int
-        #     cv2.circle(output, (cx, cy), 5, (255, 0, 0), 3)
-
-
-
-        # idx = 2 # secong biggest area
-
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-
-
-        # num_labels, labels = cv2.connectedComponents(thresh_frame)
-
-        # thresh_frame = (labels == 1)
-        # thresh_frame = cv2.erode(thresh_frame, np.ones((30,30)))
-        # thresh_frame = cv2.dilate(thresh_frame, np.ones((5,5)), iterations = 1)
-
-        cv2.imshow("Camera", frame)
-        cv2.imshow("Edges", mask)
+        cv2.imshow("Camera", frame_orginal)
+        cv2.imshow("Bird eye", frame)
         cv2.waitKey(1)
 
 

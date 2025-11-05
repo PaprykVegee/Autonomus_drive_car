@@ -1,13 +1,3 @@
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import CameraInfo, Image
-from cv_bridge import CvBridge
-from geometry_msgs.msg import Twist
-import os 
-import cv2
-import numpy as np
-from scipy.interpolate import splprep, splev
-
 #to create bridge
 #ros2 run ros_gz_bridge parameter_bridge /cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist
 
@@ -15,194 +5,187 @@ from scipy.interpolate import splprep, splev
 #   /cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist \
 #   /world/mecanum_drive/model/vehicle_blue/link/front_camera_link/sensor/front_camera/image@sensor_msgs/msg/Image@gz.msgs.Image
 
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+from geometry_msgs.msg import Twist
+import numpy as np
+import cv2
+from scipy.interpolate import UnivariateSpline
+
+# --- Klasa Regulatora PID ---
+class regulatorPID():
+    def __init__(self, P, I, D, dt, outlim):
+        self.P = P
+        self.I = I
+        self.D = D
+        self.dt = dt
+        self.outlim = outlim
+        self.x_prev = 0 
+        self.x_sum = 0
+
+    def output(self, x):
+        
+        P = self.P * x
+        if np.abs(x) < self.outlim: 
+            self.x_sum += self.I * x * self.dt
+        D = self.D * (x - self.x_prev) / self.dt
+        out = P + self.x_sum + D
+        self.x_prev = x
+        if out > self.outlim: out = self.outlim
+        elif out < -self.outlim: out = -self.outlim
+        
+        return out
+    
+# --- Funkcje Przetwarzania Obrazu ---
+def perspectiveWarp(frame):
+    # Funkcja do transformacji perspektywy (Widok z Góry - BEV)
+    height, width = frame.shape[:2]
+    y_sc = 0.6 
+    x_sc = 0.3399 
+    H2 = int(height * y_sc)
+    W2_L = int(width * x_sc)
+    W2_R = int(width * (1 - x_sc))
+    
+    src = np.float32([
+        [W2_L, H2], 
+        [W2_R, H2], 
+        [width, height],
+        [0, height]
+    ])
+
+    dst = np.float32([
+        [0, 0],             
+        [width, 0],         
+        [width, height],    
+        [0, height]         
+    ])
+    img_size = (width, height)
+    matrix = cv2.getPerspectiveTransform(src, dst)
+    birdseye = cv2.warpPerspective(frame, matrix, img_size)
+    return birdseye
+
+def get_yellow_centroids(frame, visu=True):
+    frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    lower_yellow = np.array([10, 80, 80])   
+    upper_yellow = np.array([35, 255, 255])
+    
+    mask = cv2.inRange(frame_hsv, lower_yellow, upper_yellow)
+    height, width = frame.shape[:2]
+  
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    centroids_list = []
+
+    for i in range(1, num_labels):  
+        cx, cy = centroids[i]
+        if 0 <= cx < width and 0 <= cy < height:
+            centroids_list.append((int(cx), int(cy)))
+            if visu:
+                cv2.circle(frame, (int(cx), int(cy)), 5, (0, 255, 0), 2)
+    
+    return centroids_list, frame
+
+
 class ControllerNode(Node):
 
     def __init__(self):
         super().__init__("controller_node")
-        # Timer
-        self.send_msg_timer = 0.5
+        
+        self.x = 0 
+        self.vx = 0.0 
+        
+        self.PID = regulatorPID(0.1, 0, 0.02, 0.05, 1.0) 
+        
+        self.send_msg_timer = 0.05 
 
-        # Publisher na /cmd_vel -> control
         self.cmd_vel_publisher = self.create_publisher(Twist, "/cmd_vel", 10)
 
-        # Create subscriber -> Camera 
         self.bridge = CvBridge()
-
         self.create_subscription(
             Image,
             "/world/mecanum_drive/model/vehicle_blue/link/front_camera_link/sensor/front_camera/image",
-            # self.set_speed,
-            # 10
             self.image_callback,
             10
         )
-        self.get_logger().info("Camera viewer started.")
+        self.get_logger().info("Camera viewer and controller started.")
 
-
-        # Timer for msg sending
         self.timer = self.create_timer(self.send_msg_timer, self.set_speed)
 
-    def set_speed(self):
-      msg_out=Twist()
+    def set_speed(self): 
+        msg_out = Twist()
+        out = self.PID.output(self.x) 
+        print(f'Output PID [deg]: {out:.4f}')
 
-      # --- control algo ---
-
-
-      # --------------------
-
-      # --- speed mapping ---
-      msg_out.linear.x = 0.3
-      msg_out.linear.y = 0.
-      msg_out.angular.z = 0.
-      self.cmd_vel_publisher.publish(msg_out)
-      self.get_logger().info(f"Msg sent: x={msg_out.linear.x}, y={msg_out.linear.y}, a_z={msg_out.angular.z}")
-
-
-
-    # --- image processing fcn ----
-
-    def perspectiveWarp(self, frame):
-        # Obszar z obrazu wejściowego, który ma być rzutowany
-        width = 640 
-        height = 480
-        offset = 100
-        src = np.float32([
-            [200, 300],  # lewy górny róg pasa
-            [440, 300],  # prawy górny róg pasa
-            [0, 480],    # lewy dolny róg obrazu
-            [width, 480] # prawy dolny róg obrazu
-        ])
-
-        # --- 2. Punkty docelowe (prostokąt bird's eye) ---
-        dst = np.float32([
-            [0, 0],          # lewy górny
-            [width, 0],      # prawy górny
-            [0, height],     # lewy dolny
-            [width, height]  # prawy dolny
-        ])
-
-
-        # Wyciągnięcie rozmiaru obrazu
-        img_size = (frame.shape[1], frame.shape[0])
-
-        # Rzutowanie obszaru z src na obszar dst
-        matrix = cv2.getPerspectiveTransform(src, dst)
-        birdseye = cv2.warpPerspective(frame, matrix, img_size)
-
-        return birdseye
-
-    def image_callback(self, msg):
-
-
-
-        # 1) uporzadkowac kod
-        # 2) zmienic transformate hougha -> szukanie centroidow 
-
-
-        # Konwersja obrazu ROS -> OpenCV
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8') #480x640
-        frame = self.perspectiveWarp(frame)
-        # gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # edges = cv2.Canny(gray, 100, 200)
-
-        frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        lower_yellow = np.array([10, 80, 80])   
-        upper_yellow = np.array([35, 255, 255])
-        mask = cv2.inRange(frame_hsv, lower_yellow, upper_yellow)
-
-
-        # thresh_lvl = 50
-        # _, thresh_frame = cv2.threshold(frame,  thresh_lvl, 255, cv2.THRESH_BINARY_INV)
-        edges = cv2.Canny(mask, 100, 200)
-
-        lines = cv2.HoughLinesP(edges,
-                        rho=1,
-                        theta=np.pi/180,
-                        threshold=50,
-                        minLineLength=50,
-                        maxLineGap=20)
-        x = []
-        y = []
-        if not lines is None:                
-            for l in lines:                
-                x1, y1, x2, y2 = l[0]
-                x.append(x1)
-                x.append(x2)
-                y.append(y1)
-                y.append(y2)
-
-                # cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-
+        msg_out.linear.x = self.vx  # dynamiczna prędkość obliczona w image_callback
+        msg_out.linear.y = 0.0 
+        msg_out.angular.z = float(out)
         
-        # Tworzymy spline parametryczny przechodzący dokładnie przez punkty
-        spline_avail = False
-        if len(x) >= 4:
-            k = 3  # domyślny cubic spline
-            spline_avail = True
-        elif len(x) == 3:
-            k = 2
-            spline_avail = True
-        elif len(x) == 2:
-            k = 1
-            spline_avail = True
-
-        if spline_avail: 
-            tck, u = splprep([x, y], s=0, k=k)
-
-            # Generujemy 100 punktów na spline, aby linia była gładka
-            u_fine = np.linspace(0, 1, 100)
-            x_fine, y_fine = splev(u_fine, tck)
-
-            # Rysujemy spline na obrazie
-            for i in range(1, len(x_fine)):
-                pt1 = (int(x_fine[i-1]), int(y_fine[i-1]))
-                pt2 = (int(x_fine[i]), int(y_fine[i]))
-                cv2.line(frame, pt1, pt2, (0, 255, 0), 2)  # zielona linia
-
-
-        # blur = cv2.GaussianBlur(gray, (5,5), 0)
-        # edges = cv2.Canny(blur, threshold1=50, threshold2=150)
-
-        # num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh_frame)
-
-        # thresh_frame = np.uint8(labels == 2) * 255
-        # jeśli thresh_frame jest 1-kanałowy, konwertujemy na BGR
-        # output = cv2.cvtColor(thresh_frame, cv2.COLOR_GRAY2BGR)
+        self.cmd_vel_publisher.publish(msg_out)
+        self.get_logger().info(f"Msg sent: v_x={msg_out.linear.x:.2f}, a_z={msg_out.angular.z:.4f}")
 
 
 
+    def image_callback(self, msg): 
+        try:
+            frame_orginal = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e:
+            self.get_logger().error(f"CvBridge conversion error: {e}")
+            return
 
-        # for i in range(2, num_labels):  # pomijamy tło i pierwszy największy komponent
-        #     cx, cy = centroids[i]
-        #     cx, cy = int(cx), int(cy)  # zamiana na int
-        #     cv2.circle(output, (cx, cy), 5, (255, 0, 0), 3)
+        frame = frame_orginal.copy()
+        frame_bev = perspectiveWarp(frame)
 
+        centroids_list, frame = get_yellow_centroids(frame_bev)
 
+        height, width = frame_bev.shape[:2]
 
-        # idx = 2 # secong biggest area
+        if len(centroids_list) > 0:
+            avg_x = np.mean([c[0] for c in centroids_list])
 
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
+            center_x = width / 2
+            error = 5 * (center_x - avg_x) / center_x  # błąd kierunku
 
+            self.x = error
 
-        # num_labels, labels = cv2.connectedComponents(thresh_frame)
+            # --- Dynamiczna prędkość liniowa ---
+            v_max = 5.0
+            v_min = 1
+            k = 0.7
 
-        # thresh_frame = (labels == 1)
-        # thresh_frame = cv2.erode(thresh_frame, np.ones((30,30)))
-        # thresh_frame = cv2.dilate(thresh_frame, np.ones((5,5)), iterations = 1)
+            v = v_max * (1 - k * abs(error))
+            v = np.clip(v, v_min, v_max)
+            self.vx = v
 
-        cv2.imshow("Camera", frame)
-        cv2.imshow("Edges", mask)
+            # --- Wizualizacja ---
+            cv2.line(frame, (int(center_x), 0), (int(center_x), height), (255, 0, 0), 2)
+            cv2.line(frame, (int(avg_x), 0), (int(avg_x), height), (0, 0, 255), 2)
+            cv2.putText(frame, f"Error: {error:.3f}", (30, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(frame, f"Speed: {v:.2f}", (30, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        else:
+            # Gdy nie wykryto linii — zatrzymujemy skręt i zwalniamy
+            self.x = 0.0
+            self.vx = 0.0
+
+        cv2.imshow("Bird eye", frame)
         cv2.waitKey(1)
+
 
 
 
 def main():
     rclpy.init()
     node = ControllerNode()
-    rclpy.spin(node) 
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node) 
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

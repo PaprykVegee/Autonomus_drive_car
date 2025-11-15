@@ -1,3 +1,4 @@
 siapwpa_ros2_project-main/model_trening/carla_dataset
 siapwpa_ros2_project-main/model_trening/gazebo_train_data_generator/imgs
 siapwpa_ros2_project-main/model_trening/gazebo_train_data_generator/masks
+siapwpa_ros2_project-main/model_trening/cheakpoint/best-unet-epoch=06-val_dice=0.9587.ckpt

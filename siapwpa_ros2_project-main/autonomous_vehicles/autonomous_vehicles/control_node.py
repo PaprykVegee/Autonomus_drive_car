@@ -398,17 +398,17 @@ class ControllerNode(Node):
 
 
 def main():
-    processes = []
-    commands = ["ros2 run ros_gz_bridge parameter_bridge /cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist",
-                    "ros2 run ros_gz_bridge parameter_bridge \
-      /cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist \
-      /world/mecanum_drive/model/vehicle_blue/link/left_camera_link/sensor/left_camera_sensor/image@sensor_msgs/msg/Image@gz.msgs.Image \
-      /world/mecanum_drive/model/vehicle_blue/link/right_camera_link/sensor/right_camera_sensor/image@sensor_msgs/msg/Image@gz.msgs.Image"
-    ]
+    # processes = []
+    # commands = ["ros2 run ros_gz_bridge parameter_bridge /cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist",
+    #                 "ros2 run ros_gz_bridge parameter_bridge \
+    #   /cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist \
+    #   /world/mecanum_drive/model/vehicle_blue/link/left_camera_link/sensor/left_camera_sensor/image@sensor_msgs/msg/Image@gz.msgs.Image \
+    #   /world/mecanum_drive/model/vehicle_blue/link/right_camera_link/sensor/right_camera_sensor/image@sensor_msgs/msg/Image@gz.msgs.Image"
+    # ]
     
-    for cmd in commands:
-        p = subprocess.Popen(shlex.split(cmd)) 
-        processes.append(p)
+    # for cmd in commands:
+    #     p = subprocess.Popen(shlex.split(cmd)) 
+    #     processes.append(p)
         
     rclpy.init()
     node = ControllerNode()
@@ -420,5 +420,5 @@ def main():
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == '__main__':
-    main()
+# if __name__ == '__main__':
+#     main()

@@ -12,13 +12,15 @@ def generate_launch_description():
         output="screen"
     )
 
-    gz_bridge = ExecuteProcess(
-        cmd=[
-            "ros2", "run", "ros_gz_bridge", "parameter_bridge",
-            "--bridge-config", gz_bridge_path
-        ],
-        output="screen"
+    gz_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=['/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
+                   '/world/mecanum_drive/model/vehicle_blue/link/left_camera_link/sensor/left_camera_sensor/image@sensor_msgs/msg/Image@gz.msgs.Image',
+                   '/world/mecanum_drive/model/vehicle_blue/link/right_camera_link/sensor/right_camera_sensor/image@sensor_msgs/msg/Image@gz.msgs.Image'],
+        output='screen'
     )
+
 
     control_node = Node(
         package='autonomous_vehicles',  # poprawna nazwa pakietu

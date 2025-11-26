@@ -16,14 +16,14 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=['/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
-                   '/world/mecanum_drive/model/vehicle_blue/link/left_camera_link/sensor/left_camera_sensor/image@sensor_msgs/msg/Image@gz.msgs.Image',
-                   '/world/mecanum_drive/model/vehicle_blue/link/right_camera_link/sensor/right_camera_sensor/image@sensor_msgs/msg/Image@gz.msgs.Image'],
+                   '/world/mecanum_drive/model/vehicle_blue/link/camera_link/sensor/camera_sensor/image@sensor_msgs/msg/Image@gz.msgs.Image',
+                   'world/mecanum_drive/model/vehicle_blue/link/lidar_link/sensor/lidar/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan'],
         output='screen'
     )
 
 
     control_node = Node(
-        package='autonomous_vehicles',  # poprawna nazwa pakietu
+        package='autonomous_vehicles',  
         executable='control_node',
         name='control_node',
         output="screen"

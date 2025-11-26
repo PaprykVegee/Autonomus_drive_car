@@ -104,14 +104,8 @@ class ControllerNode(Node):
         self.bridge = CvBridge()
         self.create_subscription(
             Image,
-            "/world/mecanum_drive/model/vehicle_blue/link/left_camera_link/sensor/left_camera_sensor/image",
+            "/world/mecanum_drive/model/vehicle_blue/link/camera_link/sensor/camera_sensor/image",
             self.get_left_img,
-            10
-        )
-        self.create_subscription(
-            Image,
-            "/world/mecanum_drive/model/vehicle_blue/link/right_camera_link/sensor/right_camera_sensor/image",
-            self.get_right_img,
             10
         )
 
@@ -147,16 +141,7 @@ class ControllerNode(Node):
             self.get_logger().error(f"[left camera] CvBridge conversion error: {e}")
             self.left_camera_status = False
             return
-    
-    def get_right_img(self, msg):
-        try:
-            self.right_camera_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            self.right_camera_status = True
-        except Exception as e:
-            self.get_logger().error(f"[right camera] CvBridge conversion error: {e}")
-            self.right_camera_status = False
-            return
-    
+        
     def control_loop(self):
         if self.left_camera_img is None:
             return  
